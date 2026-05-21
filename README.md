@@ -12,6 +12,7 @@ End-to-end project scaffold with:
 Start the full stack:
 
 ```sh
+export OPENAI_API_KEY=your_api_key_here
 docker compose up --build
 ```
 
@@ -48,8 +49,13 @@ Run the browser chat adapter for the frontend:
 
 ```sh
 cd apps/mcp-server
+export OPENAI_API_KEY=your_api_key_here
 npm run dev:http
 ```
+
+When `OPENAI_API_KEY` is set, the browser chat adapter uses OpenAI's Responses
+API with live hotel inventory from `GET /api/hotels`. Set `OPENAI_MODEL` to
+override the default model, which is `gpt-5.4-mini`.
 
 ## Service URLs
 
