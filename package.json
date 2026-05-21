@@ -1,0 +1,13 @@
+{
+  "name": "code-fest-26",
+  "private": true,
+  "scripts": {
+    "dev:api": "mvn -f apps/api/pom.xml spring-boot:run -Dspring-boot.run.profiles=dev",
+    "dev:web": "npm --prefix apps/web run dev",
+    "dev:mcp": "npm --prefix apps/mcp-server run dev",
+    "dev:mcp:http": "npm --prefix apps/mcp-server run dev:http",
+    "build:web": "npm --prefix apps/web run build",
+    "build:mcp": "npm --prefix apps/mcp-server run build",
+    "docker:up": "docker compose up --build"
+  }
+}

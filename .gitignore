@@ -1,0 +1,13 @@
+.DS_Store
+.idea/
+
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.local
+
+target/
+*.class
+
+postgres-data/

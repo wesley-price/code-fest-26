@@ -1,0 +1,69 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: codefest-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: codefest
+      POSTGRES_USER: codefest
+      POSTGRES_PASSWORD: codefest
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codefest -d codefest"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ./apps/api
+    container_name: codefest-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/codefest
+      SPRING_DATASOURCE_USERNAME: codefest
+      SPRING_DATASOURCE_PASSWORD: codefest
+      HOTEL_HOLD_DURATION: 12h
+      HOTEL_CONFIRMATION_BASE_URL: http://localhost:5173/reservations
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health | grep UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  mcp-server:
+    build:
+      context: ./apps/mcp-server
+    container_name: codefest-mcp-server
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      MCP_TRANSPORT: http
+      MCP_HTTP_PORT: 8790
+      HOTEL_API_BASE_URL: http://api:8080
+    ports:
+      - "8790:8790"
+
+  web:
+    build:
+      context: ./apps/web
+    container_name: codefest-web
+    restart: unless-stopped
+    depends_on:
+      - mcp-server
+    ports:
+      - "5173:80"
+
+volumes:
+  postgres-data:

@@ -1,0 +1,15 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:codefest-test;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: create-drop
+
+hotel:
+  holds:
+    default-duration: 12h
+    confirmation-base-url: http://localhost:5173/reservations
