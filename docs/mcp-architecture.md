@@ -49,6 +49,8 @@ The server currently exposes:
 
 - Resource: `project-overview`
 - Resource URI: `codefest://project/overview`
+- Resource: `travel-search-rules`
+- Resource URI: `codefest://travel/search-rules`
 - Tool: `list_hotels`
 - Tool: `get_hotel`
 - Tool: `create_hotel_hold`
@@ -65,8 +67,32 @@ The server currently exposes:
 Code Fest 26 contains a fake ChatGPT frontend, a Spring Boot hotel reservation API, Postgres, and this MCP server.
 ```
 
+`travel-search-rules` returns the expected destination-first hotel discovery
+behavior:
+
+```text
+When a user asks for a broad travel type such as beach, tropical, mountain, or
+city break without naming a city, use MCP hotel inventory to find matching
+destinations first. Present city options and ask the user to choose one. After
+the user chooses a city, list the available hotels in that city.
+```
+
 Use resources for read-only context that a client can fetch when it needs
 background information about the project.
+
+## Travel Search Rule
+
+The hotel chat flow is destination-first:
+
+1. If the user provides a broad intent or vibe, such as "beach", "somewhere
+   tropical", or "mountains", query or inspect the MCP hotel inventory and return
+   matching destinations/cities only.
+2. Ask the user to pick a city.
+3. Once the user chooses a city, call `list_hotels` with the city filter and
+   display the hotels available there.
+
+Do not list individual hotels in the first response unless the user already
+named a city or explicitly asked to see all matching hotels.
 
 ## Tools
 

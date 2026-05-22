@@ -19,7 +19,7 @@ public record HoldResponse(
     String phoneNumber,
     String confirmationUrl) {
   static HoldResponse from(HotelHold hold, String confirmationBaseUrl) {
-    String confirmationUrl = confirmationBaseUrl + "/holds/" + hold.getId() + "/complete";
+    String confirmationUrl = confirmationBaseUrl + "?reservation=" + hold.getId();
     return new HoldResponse(
         hold.getId(),
         HotelResponse.from(hold.getHotel()),

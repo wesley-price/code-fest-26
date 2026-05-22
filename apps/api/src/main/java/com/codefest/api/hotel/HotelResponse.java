@@ -1,6 +1,7 @@
 package com.codefest.api.hotel;
 
 import java.math.BigDecimal;
+import java.util.List;
 
 public record HotelResponse(
     Long id,
@@ -10,7 +11,8 @@ public record HotelResponse(
     String description,
     BigDecimal nightlyRate,
     String currency,
-    int availableRooms) {
+    int availableRooms,
+    List<RoomResponse> rooms) {
   static HotelResponse from(Hotel hotel) {
     return new HotelResponse(
         hotel.getId(),
@@ -20,6 +22,7 @@ public record HotelResponse(
         hotel.getDescription(),
         hotel.getNightlyRate(),
         hotel.getCurrency(),
-        hotel.getAvailableRooms());
+        hotel.getAvailableRooms(),
+        hotel.getRooms().stream().map(RoomResponse::from).toList());
   }
 }

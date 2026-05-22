@@ -53,7 +53,7 @@ services:
       MCP_HTTP_PORT: 8790
       HOTEL_API_BASE_URL: http://api:8080
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4-mini}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5-mini}
     ports:
       - "8790:8790"
 

@@ -13,6 +13,7 @@ import {
   Mic,
   MicOff,
   PanelLeft,
+  Plane,
   Plus,
   Search,
   Send,
@@ -118,7 +119,7 @@ type Partnership = {
   category: string;
   description: string;
   offer: string;
-  icon: "dining" | "coffee" | "ride" | "rewards";
+  icon: "dining" | "coffee" | "ride" | "air" | "rewards";
   distance: string;
   mapPosition: {
     top: string;
@@ -143,7 +144,14 @@ const initialAssistantMessage =
   "I'm your travel concierge. Tell me what kind of trip you're picturing, even if it's rough. I can help narrow the vibe, compare options, and then place a 12-hour hold when you're ready.";
 
 function fallbackReply(message: string) {
-  return `I could not reach the MCP hotel assistant. Your message was: "${message}". Make sure the Spring API is running on port 8080 and the MCP HTTP adapter is running on port 8790.`;
+  if (isNewHotelSearch(message)) {
+    return (
+      "I can help with that. What kind of trip sounds right: beach and warm, food-focused city break, mountains, or a quiet work-friendly stay? " +
+      "When the travel assistant is connected, I can compare the MCP hotel inventory and place a hold."
+    );
+  }
+
+  return "I could not reach the assistant backend. Try again after the chat service is running.";
 }
 
 function hotelListFallbackReply() {
@@ -337,21 +345,52 @@ function prepareOutboundMessage(message: string, hotels: Hotel[]) {
   };
 }
 
+const bostonRestaurantPool = [
+  { name: "Neptune Oyster", distance: "0.4 mi", description: "Award-winning raw bar and New England seafood in the North End." },
+  { name: "Toro", distance: "0.6 mi", description: "Lively Barcelona-style tapas bar with craft cocktails in the South End." },
+  { name: "Island Creek Oyster Bar", distance: "0.3 mi", description: "Farm-to-table oysters and New England coastal cuisine in Kenmore Square." },
+  { name: "Eastern Standard Kitchen", distance: "0.5 mi", description: "Classic brasserie fare and an extensive wine list near Fenway." },
+  { name: "Oleana", distance: "0.7 mi", description: "Mediterranean and Middle Eastern flavors with a celebrated patio in Cambridge." },
+  { name: "The Butcher Shop", distance: "0.4 mi", description: "Charcuterie-driven wine bar and bistro in the South End." },
+  { name: "Waypoint", distance: "0.5 mi", description: "Seasonal New American menu with a raw bar in Harvard Square." },
+  { name: "Coppa", distance: "0.6 mi", description: "Rustic Italian enoteca with house-made pasta and pizzas in the South End." },
+];
+
+const airlinePool = [
+  {
+    name: "Delta Air Lines",
+    description: "Earn SkyMiles on Delta flights booked through your Marriott Bonvoy stay.",
+    offer: "Link your SkyMiles number at check-in to start earning automatically.",
+  },
+  {
+    name: "American Airlines",
+    description: "Earn AAdvantage miles on American flights connected to your Marriott reservation.",
+    offer: "Enter your AAdvantage number at check-in to earn miles on your trip.",
+  },
+];
+
+function pickRandom<T>(pool: T[]): T {
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
 function getHotelPartnerships(reservation: Hold): Partnership[] {
+  const restaurant = pickRandom(bostonRestaurantPool);
+  const airline = pickRandom(airlinePool);
+
   return [
     {
-      name: "Marriott Eat Around Town",
-      category: "Dining rewards",
-      description: `Earn bonus points at participating restaurants near ${reservation.hotel.name}.`,
-      offer: "Link a card before dinner to earn on eligible checks.",
+      name: restaurant.name,
+      category: "Eat Around Town · Boston",
+      description: `${restaurant.description} Earn Marriott Bonvoy points on eligible checks.`,
+      offer: "Link your Bonvoy card before dinner to earn on eligible checks.",
       icon: "dining",
-      distance: "0.3 mi",
+      distance: restaurant.distance,
       mapPosition: { top: "32%", left: "68%" }
     },
     {
       name: "Starbucks",
-      category: "Coffee and breakfast",
-      description: "Order ahead for lobby pickup or nearby cafe pickup before your day starts.",
+      category: "Coffee & Breakfast",
+      description: "Order ahead for lobby pickup or grab a drink from the nearest café before your day starts.",
       offer: "Show your hotel confirmation for a featured beverage offer.",
       icon: "coffee",
       distance: "0.1 mi",
@@ -359,7 +398,7 @@ function getHotelPartnerships(reservation: Hold): Partnership[] {
     },
     {
       name: "Uber",
-      category: "Airport and city rides",
+      category: "Rides & Transfers",
       description: `Book rides to and from ${reservation.hotel.city} attractions without leaving the trip flow.`,
       offer: "Save your hotel address as the default pickup and drop-off.",
       icon: "ride",
@@ -367,25 +406,19 @@ function getHotelPartnerships(reservation: Hold): Partnership[] {
       mapPosition: { top: "70%", left: "36%" }
     },
     {
-      name: "Lyft",
-      category: "Local transportation",
-      description: "Compare ride options for airport transfers, restaurants, and events.",
-      offer: "Use your confirmation number to unlock trip-ready ride suggestions.",
-      icon: "ride",
-      distance: "Pickup zone",
+      name: airline.name,
+      category: "Air Travel",
+      description: airline.description,
+      offer: airline.offer,
+      icon: "air",
+      distance: "Logan Int'l",
       mapPosition: { top: "25%", left: "28%" }
     }
   ];
 }
 
 function App() {
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: 1,
-      role: "assistant",
-      content: initialAssistantMessage
-    }
-  ]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [isListening, setIsListening] = useState(false);
@@ -414,6 +447,27 @@ function App() {
         if (!cancelled && Array.isArray(hotels) && hotels.length > 0) {
           setAllHotels(hotels);
           setLastHotels(hotels);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const reservationId = new URLSearchParams(window.location.search).get("reservation");
+    if (!reservationId) return;
+
+    let cancelled = false;
+    fetch(`/api/hotel-holds/${reservationId}`)
+      .then((response) => (response.ok ? (response.json() as Promise<Hold>) : null))
+      .then((hold) => {
+        if (cancelled || !hold || !isHold(hold)) return;
+        if (hold.status === "CONFIRMED") {
+          setCompletedReservation(hold);
+        } else if (hold.status === "HELD") {
+          setPendingHold(hold);
         }
       })
       .catch(() => undefined);
@@ -817,6 +871,11 @@ function App() {
     setIsListening(true);
   }
 
+  const completedPartnerships = useMemo(
+    () => (completedReservation ? getHotelPartnerships(completedReservation) : []),
+    [completedReservation]
+  );
+
   if (pendingHold && !completedReservation) {
     return (
       <BookingPage
@@ -833,7 +892,7 @@ function App() {
     return (
       <PartnershipsPage
         reservation={completedReservation}
-        partnerships={getHotelPartnerships(completedReservation)}
+        partnerships={completedPartnerships}
         onDone={handleSuccessDismiss}
       />
     );
@@ -868,7 +927,7 @@ function App() {
           <button className="icon-button mobile-only" aria-label="Open menu">
             <Menu size={18} />
           </button>
-          <strong>HotelGPT</strong>
+          <strong>Claude</strong>
           <button className="account-button" aria-label="Account">
             <UserRound size={18} />
           </button>
@@ -1049,6 +1108,13 @@ function splitName(full: string | null | undefined): { first: string; last: stri
   return { first: parts[0], last: parts.slice(1).join(" ") };
 }
 
+function getStayNights(checkIn: string, checkOut: string) {
+  const start = new Date(`${checkIn}T00:00:00`);
+  const end = new Date(`${checkOut}T00:00:00`);
+  const nights = Math.round((end.getTime() - start.getTime()) / 86_400_000);
+  return Number.isFinite(nights) && nights > 0 ? nights : 1;
+}
+
 function BookingPage({ hold, onSubmit, onCancel, error, isSubmitting }: BookingPageProps) {
   const initial = splitName(hold.guestName);
   const [contactMode, setContactMode] = useState<"guest" | "loyalty">("guest");
@@ -1106,6 +1172,8 @@ function BookingPage({ hold, onSubmit, onCancel, error, isSubmitting }: BookingP
   }
 
   const displayError = localError ?? error;
+  const nights = getStayNights(hold.checkIn, hold.checkOut);
+  const estimatedTotal = hold.hotel.nightlyRate * hold.rooms * nights;
 
   return (
     <main className="booking-page">
@@ -1116,25 +1184,55 @@ function BookingPage({ hold, onSubmit, onCancel, error, isSubmitting }: BookingP
               <ArrowLeft size={16} />
               Back to chat
             </button>
-            <h1 id="booking-page-title">Complete your reservation</h1>
+            <p className="booking-eyebrow">Reservation details</p>
+            <h1 id="booking-page-title">Complete your stay</h1>
           </div>
-          <span className="booking-step">Secure booking</span>
+          <span className="booking-step">Secure checkout</span>
         </header>
 
         <section className="booking-layout">
           <aside className="booking-summary">
-            <span className="booking-summary-label">Your selected hold</span>
+            <span className="booking-summary-label">Your selected hotel</span>
             <span className="booking-summary-hotel">{hold.hotel.name}</span>
-            <span>{hold.hotel.city}, {hold.hotel.country}</span>
-            <span>{hold.checkIn} to {hold.checkOut}</span>
-            <span>
-              {hold.rooms} room{hold.rooms === 1 ? "" : "s"} · {hold.hotel.currency}{" "}
-              {hold.hotel.nightlyRate.toFixed(2)}/night
-            </span>
+            <span className="booking-summary-location">{hold.hotel.city}, {hold.hotel.country}</span>
+            <div className="booking-summary-grid">
+              <span>
+                <strong>Check-in</strong>
+                {hold.checkIn}
+              </span>
+              <span>
+                <strong>Check-out</strong>
+                {hold.checkOut}
+              </span>
+              <span>
+                <strong>Rooms</strong>
+                {hold.rooms}
+              </span>
+              <span>
+                <strong>Nights</strong>
+                {nights}
+              </span>
+            </div>
+            <div className="booking-rate-row">
+              <span>Nightly rate</span>
+              <strong>
+                {hold.hotel.currency} {hold.hotel.nightlyRate.toFixed(2)}
+              </strong>
+            </div>
+            <div className="booking-rate-row booking-rate-total">
+              <span>Estimated total</span>
+              <strong>
+                {hold.hotel.currency} {estimatedTotal.toFixed(2)}
+              </strong>
+            </div>
             {hold.expiresAt && <span>Hold expires {new Date(hold.expiresAt).toLocaleString()}</span>}
           </aside>
 
           <form className="booking-form" onSubmit={handleSubmit}>
+            <div className="booking-form-heading">
+              <p className="booking-eyebrow">Guest information</p>
+              <h2>Tell us who is checking in</h2>
+            </div>
             <div className="hold-contact-toggle" role="group" aria-label="Contact method">
               <button
                 type="button"
@@ -1208,6 +1306,10 @@ function BookingPage({ hold, onSubmit, onCancel, error, isSubmitting }: BookingP
                 />
               </label>
             )}
+            <div className="booking-form-heading booking-payment-heading">
+              <p className="booking-eyebrow">Payment method</p>
+              <h2>Guarantee your reservation</h2>
+            </div>
             <label>
               Card number
               <input
@@ -1275,11 +1377,14 @@ function PartnershipIcon({ type }: { type: Partnership["icon"] }) {
   if (type === "dining") return <Utensils size={22} />;
   if (type === "coffee") return <Coffee size={22} />;
   if (type === "ride") return <Car size={22} />;
+  if (type === "air") return <Plane size={22} />;
   return <Gift size={22} />;
 }
 
 function PartnershipsPage({ reservation, partnerships, onDone }: PartnershipsPageProps) {
   const confirmationCode = reservation.id.slice(0, 8).toUpperCase();
+  const nights = getStayNights(reservation.checkIn, reservation.checkOut);
+  const estimatedTotal = reservation.hotel.nightlyRate * reservation.rooms * nights;
 
   return (
     <main className="partners-page">
@@ -1289,10 +1394,35 @@ function PartnershipsPage({ reservation, partnerships, onDone }: PartnershipsPag
         </div>
         <p className="partners-kicker">Reservation confirmed</p>
         <h1>{reservation.hotel.name}</h1>
-        <p>
-          Confirmation #{confirmationCode} · {reservation.checkIn} to {reservation.checkOut} ·{" "}
-          {reservation.hotel.city}, {reservation.hotel.country}
-        </p>
+        <p>{reservation.hotel.city}, {reservation.hotel.country}</p>
+        <div className="confirmation-card" aria-label={`Confirmation number ${confirmationCode}`}>
+          <span>Confirmation number</span>
+          <strong>{confirmationCode}</strong>
+        </div>
+        <div className="confirmation-details">
+          <span>
+            <strong>Check-in</strong>
+            {reservation.checkIn}
+          </span>
+          <span>
+            <strong>Check-out</strong>
+            {reservation.checkOut}
+          </span>
+          <span>
+            <strong>Guests</strong>
+            {reservation.guestName ?? "Guest"}
+          </span>
+          <span>
+            <strong>Total</strong>
+            {reservation.hotel.currency} {estimatedTotal.toFixed(2)}
+          </span>
+        </div>
+        <a
+          href={`?reservation=${reservation.id}`}
+          className="confirmation-link"
+        >
+          View reservation
+        </a>
       </section>
 
       <section className="partners-content" aria-labelledby="partners-title">
@@ -1326,6 +1456,7 @@ function PartnershipsPage({ reservation, partnerships, onDone }: PartnershipsPag
               <div
                 key={partner.name}
                 className="partner-pin"
+                data-category={partner.icon}
                 style={{ top: partner.mapPosition.top, left: partner.mapPosition.left }}
               >
                 <PartnershipIcon type={partner.icon} />
@@ -1337,7 +1468,7 @@ function PartnershipsPage({ reservation, partnerships, onDone }: PartnershipsPag
 
         <div className="partners-grid">
           {partnerships.map((partner) => (
-            <article key={partner.name} className="partner-card">
+            <article key={partner.name} className="partner-card" data-category={partner.icon}>
               <div className="partner-icon" aria-hidden="true">
                 <PartnershipIcon type={partner.icon} />
               </div>

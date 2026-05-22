@@ -1,12 +1,18 @@
 package com.codefest.api.hotel;
 
+import jakarta.persistence.CascadeType;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.OneToMany;
+import jakarta.persistence.OrderBy;
 import jakarta.persistence.Table;
 import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.List;
 
 @Entity
 @Table(name = "hotels")
@@ -35,6 +41,10 @@ public class Hotel {
 
   @Column(nullable = false)
   private int availableRooms;
+
+  @OneToMany(mappedBy = "hotel", cascade = CascadeType.ALL, fetch = FetchType.EAGER, orphanRemoval = true)
+  @OrderBy("hasView DESC, name ASC")
+  private List<Room> rooms = new ArrayList<>();
 
   protected Hotel() {}
 
@@ -85,5 +95,9 @@ public class Hotel {
 
   public int getAvailableRooms() {
     return availableRooms;
+  }
+
+  public List<Room> getRooms() {
+    return rooms;
   }
 }

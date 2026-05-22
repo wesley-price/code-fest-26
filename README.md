@@ -55,7 +55,7 @@ npm run dev:http
 
 When `OPENAI_API_KEY` is set, the browser chat adapter uses OpenAI's Responses
 API with live hotel inventory from `GET /api/hotels`. Set `OPENAI_MODEL` to
-override the default model, which is `gpt-5.4-mini`.
+override the default model, which is `gpt-5-mini`.
 
 ## Service URLs
 

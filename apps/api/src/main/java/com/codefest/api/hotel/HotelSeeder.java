@@ -1,6 +1,7 @@
 package com.codefest.api.hotel;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.List;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.stereotype.Component;
@@ -8,28 +9,81 @@ import org.springframework.stereotype.Component;
 @Component
 public class HotelSeeder implements CommandLineRunner {
   private final HotelRepository hotelRepository;
+  private final RoomRepository roomRepository;
 
-  public HotelSeeder(HotelRepository hotelRepository) {
+  public HotelSeeder(HotelRepository hotelRepository, RoomRepository roomRepository) {
     this.hotelRepository = hotelRepository;
+    this.roomRepository = roomRepository;
   }
 
   @Override
   public void run(String... args) {
     seedHotels()
         .forEach(
-            hotel -> {
-              if (!hotelRepository.existsByNameIgnoreCaseAndCityIgnoreCase(hotel.name(), hotel.city())) {
-                hotelRepository.save(
+            seedHotel -> {
+              Hotel hotel;
+              if (!hotelRepository.existsByNameIgnoreCaseAndCityIgnoreCase(seedHotel.name(), seedHotel.city())) {
+                hotel = hotelRepository.save(
                     new Hotel(
-                        hotel.name(),
-                        hotel.city(),
-                        hotel.country(),
-                        hotel.description(),
-                        hotel.nightlyRate(),
-                        hotel.currency(),
-                        hotel.availableRooms()));
+                        seedHotel.name(),
+                        seedHotel.city(),
+                        seedHotel.country(),
+                        seedHotel.description(),
+                        seedHotel.nightlyRate(),
+                        seedHotel.currency(),
+                        seedHotel.availableRooms()));
+              } else {
+                hotel = hotelRepository.findByNameIgnoreCaseAndCityIgnoreCase(seedHotel.name(), seedHotel.city());
+              }
+
+              if (!roomRepository.existsByHotel(hotel)) {
+                seedRoomsForHotel(hotel, seedHotel);
               }
             });
+  }
+
+  private void seedRoomsForHotel(Hotel hotel, SeedHotel seedHotel) {
+    String desc = seedHotel.description().toLowerCase();
+    String name = seedHotel.name().toLowerCase();
+    int total = seedHotel.availableRooms();
+    BigDecimal base = seedHotel.nightlyRate();
+    String currency = seedHotel.currency();
+
+    int viewCount = Math.max(1, (int) Math.round(total * 0.4));
+    int standardCount = Math.max(1, total - viewCount);
+
+    BigDecimal viewRate = base.multiply(new BigDecimal("1.25"))
+        .divide(new BigDecimal("5"), 0, RoundingMode.HALF_UP)
+        .multiply(new BigDecimal("5"));
+
+    String viewName;
+    String standardName;
+
+    if (desc.contains("overwater") || desc.contains("coral lagoon")) {
+      viewName = "Lagoon View Bungalow";
+      standardName = "Beach Villa";
+    } else if (desc.contains("caldera")) {
+      viewName = "Caldera View Suite";
+      standardName = "Garden Terrace Room";
+    } else if (desc.contains("beachfront") || desc.contains("ocean") || desc.contains("bay access") || desc.contains("waterfront")) {
+      viewName = "Ocean View Room";
+      standardName = "Garden Room";
+    } else if (desc.contains("skyline") || desc.contains("riverwalk") || name.contains("riverfront") || name.contains("harbor")) {
+      viewName = "Skyline View Room";
+      standardName = "Standard Room";
+    } else if (desc.contains("rice-paddy") || desc.contains("jungle") || desc.contains("open-air pavilion")) {
+      viewName = "Jungle View Room";
+      standardName = "Garden Pavilion";
+    } else if (desc.contains("mountain")) {
+      viewName = "Mountain View Room";
+      standardName = "Standard Room";
+    } else {
+      viewName = "City View Room";
+      standardName = "Standard Room";
+    }
+
+    roomRepository.save(new Room(hotel, viewName, true, viewRate, currency, viewCount));
+    roomRepository.save(new Room(hotel, standardName, false, base, currency, standardCount));
   }
 
   private List<SeedHotel> seedHotels() {

@@ -2,13 +2,16 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 import { z } from "zod";
 
 const apiBaseUrl = process.env.HOTEL_API_BASE_URL ?? "http://localhost:8080";
 const httpPort = Number(process.env.MCP_HTTP_PORT ?? 8790);
 const transportMode = process.env.MCP_TRANSPORT ?? "stdio";
-const openAiApiKey = process.env.OPENAI_API_KEY;
-const openAiModel = process.env.OPENAI_MODEL ?? "gpt-5.4-mini";
+const anthropicApiKey = process.env.ANTHROPIC_API_KEY ?? "";
+const anthropicModel = process.env.ANTHROPIC_MODEL ?? "claude-opus-4-7";
+const anthropicFallbackModel = process.env.ANTHROPIC_FALLBACK_MODEL ?? "claude-haiku-4-5";
 
 const server = new McpServer({
   name: "codefest-mcp-server",
@@ -21,6 +24,20 @@ server.resource("project-overview", "codefest://project/overview", async (uri) =
       uri: uri.href,
       text:
         "Code Fest 26 contains a fake ChatGPT frontend, a Spring Boot hotel reservation API, Postgres, and this MCP server."
+    }
+  ]
+}));
+
+server.resource("travel-search-rules", "codefest://travel/search-rules", async (uri) => ({
+  contents: [
+    {
+      uri: uri.href,
+      text:
+        "Destination-first hotel search rule:\n" +
+        "- When a user asks for a vibe, feature, or broad location type without naming a city, first use MCP hotel inventory to find matching destinations/cities.\n" +
+        "- Reply with city options only, then ask the user to choose a destination.\n" +
+        "- After the user picks a city, call list_hotels with that city and display the available hotels in that city.\n" +
+        "- Do not list specific hotels before the user chooses a destination unless the user explicitly asks to see all matching hotels."
     }
   ]
 }));
@@ -48,6 +65,15 @@ function jsonText(value: unknown) {
   return JSON.stringify(value, null, 2);
 }
 
+type Room = {
+  id: number;
+  name: string;
+  hasView: boolean;
+  nightlyRate: number;
+  currency: string;
+  availableCount: number;
+};
+
 type Hotel = {
   id: number;
   name: string;
@@ -57,6 +83,7 @@ type Hotel = {
   nightlyRate: number;
   currency: string;
   availableRooms: number;
+  rooms: Room[];
 };
 
 type ChatRequest = {
@@ -97,8 +124,13 @@ const monthNumbers = new Map([
   ["dec", 12]
 ]);
 
+function formatRooms(rooms: Room[]) {
+  if (!rooms || rooms.length === 0) return "";
+  return " Rooms: " + rooms.map((r) => `${r.name} (${r.hasView ? "view" : "no view"}, ${r.currency} ${r.nightlyRate}/night, ${r.availableCount} avail)`).join("; ") + ".";
+}
+
 function formatHotel(hotel: Hotel) {
-  return `${hotel.id}. ${hotel.name} in ${hotel.city}, ${hotel.country} - ${hotel.currency} ${hotel.nightlyRate}/night, ${hotel.availableRooms} rooms. ${hotel.description}`;
+  return `${hotel.id}. ${hotel.name} in ${hotel.city}, ${hotel.country} - ${hotel.currency} ${hotel.nightlyRate}/night, ${hotel.availableRooms} rooms. ${hotel.description}${formatRooms(hotel.rooms)}`;
 }
 
 function isHotelList(value: unknown): value is Hotel[] {
@@ -122,50 +154,32 @@ function formatHotelContext(hotels: Hotel[]) {
   return hotels
     .map(
       (hotel) =>
-        `${hotel.id}. ${hotel.name} | ${hotel.city}, ${hotel.country} | ${hotel.currency} ${hotel.nightlyRate}/night | ${hotel.availableRooms} rooms | ${hotel.description}`
+        `${hotel.id}. ${hotel.name} | ${hotel.city}, ${hotel.country} | ${hotel.currency} ${hotel.nightlyRate}/night | ${hotel.availableRooms} rooms | ${hotel.description}${formatRooms(hotel.rooms)}`
     )
     .join("\n");
 }
 
 function extractResponseText(value: unknown) {
-  if (value && typeof value === "object" && "output_text" in value && typeof value.output_text === "string") {
-    return value.output_text;
-  }
-
-  if (!value || typeof value !== "object" || !("output" in value) || !Array.isArray(value.output)) {
-    return null;
-  }
+  if (!value || typeof value !== "object" || !Array.isArray((value as any).content)) return null;
 
   const textParts: string[] = [];
-  for (const outputItem of value.output) {
-    if (!outputItem || typeof outputItem !== "object" || !("content" in outputItem) || !Array.isArray(outputItem.content)) {
-      continue;
-    }
-
-    for (const contentItem of outputItem.content) {
-      if (
-        contentItem &&
-        typeof contentItem === "object" &&
-        "text" in contentItem &&
-        typeof contentItem.text === "string"
-      ) {
-        textParts.push(contentItem.text);
-      }
-    }
+  for (const block of (value as { content: Array<{ type: string; text?: string }> }).content) {
+    if (block.type === "text" && typeof block.text === "string") textParts.push(block.text);
   }
 
   return textParts.length > 0 ? textParts.join("\n") : null;
 }
 
-async function openAiRequest(body: unknown) {
-  if (!openAiApiKey) {
-    throw new Error("OPENAI_API_KEY is not configured.");
+async function anthropicRequest(body: unknown) {
+  if (!anthropicApiKey) {
+    throw new Error("ANTHROPIC_API_KEY is not configured.");
   }
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${openAiApiKey}`,
+      "x-api-key": anthropicApiKey,
+      "anthropic-version": "2023-06-01",
       "Content-Type": "application/json"
     },
     body: JSON.stringify(body)
@@ -175,25 +189,31 @@ async function openAiRequest(body: unknown) {
   const responseBody = text ? JSON.parse(text) : null;
 
   if (!response.ok) {
-    throw new Error(`OpenAI request failed with ${response.status}: ${JSON.stringify(responseBody)}`);
+    throw new Error(`Anthropic request failed with ${response.status}: ${JSON.stringify(responseBody)}`);
   }
 
   return responseBody;
 }
 
-function createOpenAiChatBody(message: string, hotels: Hotel[], history: ChatHistoryMessage[] = [], stream = false) {
+function isQuotaError(error: unknown) {
+  return error instanceof Error && /429|quota|rate.?limit/i.test(error.message);
+}
+
+function createAnthropicChatBody(message: string, hotels: Hotel[], history: ChatHistoryMessage[] = [], stream = false, model = anthropicModel) {
   const recentHistory = history.slice(-8).map((item) => ({
     role: item.role,
     content: item.content
   }));
 
   return {
-    model: openAiModel,
-    instructions:
+    model,
+    system:
       "You are a friendly travel concierge embedded in a hotel-booking chat. Your job is to help the user discover where to go and which hotel fits — beach, tropical, Caribbean, Europe, jungle, city break, mountain, and so on — by drawing only from the inventory listed in Current website hotel context below.\n\n" +
       "Conversation style:\n" +
       "- Sound like a helpful person, not a search endpoint. Acknowledge what the user said in one short sentence before asking or recommending.\n" +
       "- Carry forward recent preferences from the conversation history: vibe, budget, party size, dates, region, and any rejected options.\n" +
+      "- If the user names a vibe, feature, or climate (e.g., 'beach', 'tropical', 'mountain', 'city break') without specifying a city or region, extract the distinct cities from the inventory that match and present them as options first. Ask the user to pick a destination before listing specific hotels. Example: 'I found beach destinations in Miami, San Francisco, and Seattle — which appeals to you?'\n" +
+      "- If the user then chooses one of those cities, list the available hotels in that city and do not keep asking for a destination.\n" +
       "- If the user's request is vague (e.g., 'somewhere warm', 'I want a beach trip'), ask one or two short clarifying questions about vibe, rough budget per night, approximate dates, or party size before listing picks. Don't ask more than two at a time.\n" +
       "- If the user answers a previous clarifying question, do not restart. Use the answer with the previous context and move the trip forward.\n" +
       "- Once you have enough signal, recommend 3-4 hotels that best fit. Group by region when helpful so the user can compare.\n" +
@@ -203,35 +223,60 @@ function createOpenAiChatBody(message: string, hotels: Hotel[], history: ChatHis
       "- Hotel-specific facts (name, city, country, nightly rate, available rooms, on-property description) must come ONLY from the provided context. Never invent properties, prices, room counts, amenities, confirmation numbers, or policies.\n" +
       "- You MAY describe what a city, beach, island, or neighborhood is generally known for using common geographic knowledge (e.g., 'Tulum is known for cenotes and Mayan ruins', 'Lahaina sits on Maui's west coast with Black Rock snorkeling nearby'). Keep area context to one short sentence per pick and don't fabricate specific businesses near the hotel.\n" +
       "- If nothing in the inventory matches what the user asked for, say so plainly and suggest the closest alternatives that ARE in the inventory.\n" +
-      "- If the user wants to hold, book, reserve, complete, or change a reservation, tell them the exact details you still need (hotel id or name, dates, guest name/email or loyalty number) instead of claiming you completed it.\n\n" +
+      "- If the user wants to hold, book, reserve, complete, or change a reservation, tell them the exact details you still need. For guest identity, always ask for EITHER a loyalty/rewards number OR both a full name and email address — never ask for name alone. Present both options explicitly so the user can choose. Example: 'To place this hold I need your check-in/check-out dates and either your loyalty number or your full name and email.'\n\n" +
       `Current website hotel context:\n${formatHotelContext(hotels)}`,
-    input: [
+    messages: [
       ...recentHistory,
       {
         role: "user",
         content: message
       }
     ],
-    max_output_tokens: 700,
+    max_tokens: 700,
     stream
   };
 }
 
-async function chatWithOpenAi(message: string, hotels: Hotel[], history: ChatHistoryMessage[] = []) {
-  const response = await openAiRequest(createOpenAiChatBody(message, hotels, history));
+function createAnthropicGeneralChatBody(message: string, history: ChatHistoryMessage[] = [], stream = false, model = anthropicModel) {
+  const recentHistory = history.slice(-8).map((item) => ({
+    role: item.role,
+    content: item.content
+  }));
 
-  return extractResponseText(response) ?? "I could not generate a ChatGPT response for that request.";
+  return {
+    model,
+    system:
+      "You are a concise assistant embedded in the Code Fest 26 chat UI. " +
+      "Answer the user's non-travel request directly in plain text. " +
+      "Do not invent hotel, flight, reservation, price, or room availability details.",
+    messages: [
+      ...recentHistory,
+      {
+        role: "user",
+        content: message
+      }
+    ],
+    max_tokens: 700,
+    stream
+  };
 }
 
-async function openAiStreamRequest(body: unknown) {
-  if (!openAiApiKey) {
-    throw new Error("OPENAI_API_KEY is not configured.");
+async function chatWithAnthropic(message: string, hotels: Hotel[], history: ChatHistoryMessage[] = []) {
+  const response = await anthropicRequest(createAnthropicChatBody(message, hotels, history));
+
+  return extractResponseText(response) ?? "I could not generate a response for that request.";
+}
+
+async function anthropicStreamRequest(body: unknown) {
+  if (!anthropicApiKey) {
+    throw new Error("ANTHROPIC_API_KEY is not configured.");
   }
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${openAiApiKey}`,
+      "x-api-key": anthropicApiKey,
+      "anthropic-version": "2023-06-01",
       "Content-Type": "application/json"
     },
     body: JSON.stringify(body)
@@ -239,11 +284,11 @@ async function openAiStreamRequest(body: unknown) {
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`OpenAI request failed with ${response.status}: ${text}`);
+    throw new Error(`Anthropic request failed with ${response.status}: ${text}`);
   }
 
   if (!response.body) {
-    throw new Error("OpenAI streaming response did not include a response body.");
+    throw new Error("Anthropic streaming response did not include a response body.");
   }
 
   return response.body;
@@ -394,6 +439,33 @@ function isVagueTravelRequest(message: string) {
     !/\b(beach|tropical|caribbean|mountain|city|downtown|budget|cheap|luxury|food|restaurant|coffee|airport|water|waterfront|bay|new york|boston|miami|denver|seattle|chicago|austin|atlanta|nashville|los angeles|san francisco|minneapolis)\b/i.test(message);
 }
 
+function isFeatureOnlyRequest(message: string) {
+  const hasFeature = /\b(beach|tropical|caribbean|island|warm|mountain|ski|hike|outdoor|nature|city break|nightlife|food scene|resort|jungle)\b/i.test(message);
+  const hasCity = /\b(miami|seattle|boston|new york|denver|chicago|austin|atlanta|nashville|los angeles|san francisco|minneapolis|tulum|cancun|hawaii|maui)\b/i.test(message);
+  return hasFeature && !hasCity;
+}
+
+function citiesForFeature(hotels: Hotel[], query: string) {
+  const expanded = expandTravelQuery(query);
+  const matches = searchHotelInventory(hotels, expanded);
+  const seen = new Set<string>();
+  const cities: string[] = [];
+  for (const hotel of matches) {
+    const key = `${hotel.city}, ${hotel.country}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      cities.push(key);
+    }
+  }
+  return cities;
+}
+
+function isTravelPrompt(message: string) {
+  return /\b(travel|trip|vacation|hotel|hotels|flight|flights|fly|airport|stay|stays|room|rooms|hold|reserve|reservation|book|booking|beach|mountain|tropical|caribbean|city break|getaway|go away|somewhere|destination|itinerary|check-?in|check-?out)\b/i.test(
+    message
+  );
+}
+
 function expandTravelQuery(query: string) {
   const normalized = query.toLowerCase();
   const signals = [query];
@@ -448,6 +520,16 @@ function conversationalHotelReply(message: string, hotels: Hotel[], history: Cha
       "I can help with that. What kind of trip sounds right: beach and warm, food-focused city break, mountains, or quiet work-friendly stay? " +
       "And do you have a rough nightly budget?"
     );
+  }
+
+  if (isFeatureOnlyRequest(conversationText)) {
+    const cities = citiesForFeature(hotels, conversationText);
+    if (cities.length > 0) {
+      return (
+        `I found matching destinations in: ${cities.join(", ")}. ` +
+        "Which city sounds right for your trip?"
+      );
+    }
   }
 
   const expandedQuery = expandTravelQuery(conversationText);
@@ -585,7 +667,8 @@ async function chatWithHotelAssistant(message: string, history: ChatHistoryMessa
       return {
         reply:
           `I can place the hold, but I need ${missing.join(", ")}. ` +
-          "Example: Hold Riverfront from May 28th to May 30th with loyalty number LOYALTY-12345."
+          "You can identify yourself with a loyalty/rewards number (e.g. loyalty number LOYALTY-12345) " +
+          "or with your full name and email address."
       };
     }
 
@@ -612,8 +695,8 @@ async function chatWithHotelAssistant(message: string, history: ChatHistoryMessa
 
   const locationQuery = extractLocationQuery(message);
 
-  if (openAiApiKey) {
-    const reply = await chatWithOpenAi(message, websiteHotels, history);
+  if (anthropicApiKey) {
+    const reply = await chatWithAnthropic(message, websiteHotels, history);
     return {
       reply,
       data: websiteHotels
@@ -672,8 +755,39 @@ function sendSse(response: ServerResponse, event: string, data: unknown) {
   response.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
-async function streamOpenAiChat(response: ServerResponse, message: string, hotels: Hotel[], history: ChatHistoryMessage[]) {
-  const body = await openAiStreamRequest(createOpenAiChatBody(message, hotels, history, true));
+function sendGeneralFallback(response: ServerResponse, message: string) {
+  sendSse(response, "delta", {
+    text:
+      `I received: ${message}\n\n` +
+      "The Anthropic API key is not configured, so I cannot generate a model response for this turn."
+  });
+  sendSse(response, "done", { data: null });
+}
+
+async function streamAnthropicChat(response: ServerResponse, message: string, hotels: Hotel[], history: ChatHistoryMessage[]) {
+  const doneData = { data: hotels };
+  try {
+    const body = await anthropicStreamRequest(createAnthropicChatBody(message, hotels, history, true));
+    await streamAnthropicResponse(response, body, doneData);
+  } catch (error) {
+    if (!isQuotaError(error)) throw error;
+    const body = await anthropicStreamRequest(createAnthropicChatBody(message, hotels, history, true, anthropicFallbackModel));
+    await streamAnthropicResponse(response, body, doneData);
+  }
+}
+
+async function streamAnthropicGeneralChat(response: ServerResponse, message: string, history: ChatHistoryMessage[]) {
+  try {
+    const body = await anthropicStreamRequest(createAnthropicGeneralChatBody(message, history, true));
+    await streamAnthropicResponse(response, body, {});
+  } catch (error) {
+    if (!isQuotaError(error)) throw error;
+    const body = await anthropicStreamRequest(createAnthropicGeneralChatBody(message, history, true, anthropicFallbackModel));
+    await streamAnthropicResponse(response, body, {});
+  }
+}
+
+async function streamAnthropicResponse(response: ServerResponse, body: ReadableStream<Uint8Array>, doneData: unknown) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffered = "";
@@ -690,22 +804,165 @@ async function streamOpenAiChat(response: ServerResponse, message: string, hotel
       if (!line.startsWith("data:")) continue;
 
       const data = line.slice(5).trim();
-      if (!data || data === "[DONE]") continue;
+      if (!data) continue;
 
-      const event = JSON.parse(data) as { type?: string; delta?: string; error?: unknown };
-      if (event.type === "response.output_text.delta" && typeof event.delta === "string") {
-        sendSse(response, "delta", { text: event.delta });
-      } else if (event.type === "response.completed") {
-        sendSse(response, "done", {});
+      const event = JSON.parse(data) as { type?: string; delta?: { type?: string; text?: string }; error?: unknown };
+      if (event.type === "content_block_delta" && event.delta?.type === "text_delta" && typeof event.delta.text === "string") {
+        sendSse(response, "delta", { text: event.delta.text });
+      } else if (event.type === "message_stop") {
+        sendSse(response, "done", doneData);
       } else if (event.type === "error") {
-        const openAiError =
+        const msg =
           event.error && typeof event.error === "object" && "message" in event.error
-            ? String(event.error.message)
-            : "OpenAI streaming failed.";
-        throw new Error(openAiError);
+            ? String((event.error as { message: unknown }).message)
+            : "Anthropic streaming failed.";
+        throw new Error(msg);
       }
     }
   }
+}
+
+async function getMcpTravelContext(websiteHotels: Hotel[]) {
+  const hotels = websiteHotels.length > 0 ? websiteHotels : ((await apiRequest("/api/hotels")) as Hotel[]);
+
+  return {
+    hotels,
+    text:
+      "Travel data source: codefest MCP server hotel tools backed by the Spring hotel API.\n" +
+      "Use only this travel inventory for travel, lodging, availability, price, room-count, and reservation facts. " +
+      "Do not use web search or general model knowledge for travel facts.\n\n" +
+      `Current MCP hotel inventory:\n${formatHotelContext(hotels)}`
+  };
+}
+
+async function buildCodexPrompt(
+  message: string,
+  history: ChatHistoryMessage[] = [],
+  websiteHotels: Hotel[] = [],
+  travelPrompt = isTravelPrompt(message)
+) {
+  let fullPrompt = travelPrompt
+    ? "You are answering a travel prompt in the Code Fest 26 app.\n" +
+      "- All travel data must come from the provided MCP travel context or from the codefest MCP tools.\n" +
+      "- This includes flights, hotels, destinations, room availability, prices, reservation details, and booking status.\n" +
+      "- If the MCP data does not include flights or a requested travel category, say that the MCP server has no such inventory instead of inventing it.\n" +
+      "- Destination-first rule: when the user asks for a vibe, feature, or broad location type without naming a city, use the MCP hotel inventory to find matching destinations/cities first. For example, if they say 'beach', reply with cities that have beach or water-adjacent hotels and ask them to pick a city.\n" +
+      "- After the user picks a city, call or use list_hotels for that city and display the available hotels there. Do not list specific hotels before a destination is selected unless the user explicitly asks to see all matching hotels.\n" +
+      "- You may ask brief clarifying questions when the user is vague.\n" +
+      "- Keep the answer concise and plain text for chat UI rendering.\n\n"
+    : "You are a versatile assistant in the Code Fest 26 app.\n" +
+      "- This is not a travel prompt, so do not use codefest hotel tools or travel inventory.\n" +
+      "- You may use live internet search when current or sourced information would help.\n" +
+      "- Answer directly and concisely.\n\n";
+
+  let mcpTravelData: Hotel[] = [];
+  if (travelPrompt) {
+    const travelContext = await getMcpTravelContext(websiteHotels);
+    mcpTravelData = travelContext.hotels;
+    fullPrompt += `${travelContext.text}\n\n`;
+  }
+
+  if (history.length > 0) {
+    fullPrompt += "Conversation history:\n";
+    for (const h of history) {
+      fullPrompt += `${h.role === "user" ? "User" : "Assistant"}: ${h.content}\n`;
+    }
+    fullPrompt += "\nCurrent message: ";
+  }
+  fullPrompt += message;
+
+  return { prompt: fullPrompt, travelData: mcpTravelData, travelPrompt };
+}
+
+function extractHotelsFromCodexToolCall(item: any) {
+  if (item?.type !== "mcp_tool_call" || item?.status !== "completed") return null;
+  if (!["list_hotels", "get_hotels", "get_hotel"].includes(item.tool)) return null;
+
+  const toolResult = item.result?.content?.[0]?.text;
+  if (!toolResult) return null;
+
+  try {
+    const parsed = JSON.parse(toolResult);
+    if (isHotelList(parsed)) return parsed;
+    if (parsed && typeof parsed === "object" && typeof (parsed as Hotel).id === "number") {
+      return [parsed as Hotel];
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+async function streamCodexChat(
+  response: ServerResponse,
+  message: string,
+  history: ChatHistoryMessage[] = [],
+  websiteHotels: Hotel[] = []
+) {
+  const { prompt, travelData, travelPrompt } = await buildCodexPrompt(message, history, websiteHotels);
+  const args = travelPrompt ? ["exec"] : ["--search", "exec"];
+  args.push(
+    "--json",
+    "--ephemeral",
+    "--dangerously-bypass-approvals-and-sandbox"
+  );
+
+  args.push(prompt);
+
+  const codex = spawn("codex", args);
+  codex.stdin.end();
+
+  const rl = createInterface({
+    input: codex.stdout,
+    terminal: false
+  });
+
+  let hasSentMessage = false;
+  let foundHotels: Hotel[] = travelData;
+  const processClosed = new Promise<{ error?: Error }>((resolve) => {
+    codex.on("close", (code) => {
+      if (code === 0) {
+        resolve({});
+      } else {
+        resolve({ error: new Error(`Codex exited with code ${code}`) });
+      }
+    });
+    codex.on("error", (err) => {
+      if ((err as any).code === "ENOENT") {
+        resolve({ error: new Error("Codex CLI not found in PATH. Please ensure it is installed.") });
+      } else {
+        resolve({ error: err });
+      }
+    });
+  });
+
+  for await (const line of rl) {
+    try {
+      const event = JSON.parse(line);
+      if (event.type === "item.completed") {
+        const item = event.item;
+        if (item?.type === "agent_message" && item?.text) {
+          let text = item.text;
+          if (hasSentMessage) text = "\n\n" + text;
+          sendSse(response, "delta", { text });
+          hasSentMessage = true;
+        } else if (item?.type === "mcp_tool_call" && item?.status === "completed") {
+          foundHotels = extractHotelsFromCodexToolCall(item) ?? foundHotels;
+        }
+      }
+    } catch {
+      // Ignore non-json lines or malformed json
+    }
+  }
+
+  const closeResult = await processClosed;
+  if (closeResult.error) throw closeResult.error;
+
+  if (!hasSentMessage) {
+    sendSse(response, "delta", { text: "Codex finished but returned no message." });
+  }
+  sendSse(response, "done", { data: foundHotels.length > 0 ? foundHotels : null });
 }
 
 async function sendStreamingChatResponse(response: ServerResponse, body: ChatRequest) {
@@ -728,18 +985,24 @@ async function sendStreamingChatResponse(response: ServerResponse, body: ChatReq
   });
 
   try {
-    if (openAiApiKey && !/\b(hold|reserve|reservation|book)\b/i.test(message)) {
-      try {
-        await streamOpenAiChat(response, message, websiteHotels, history);
-      } catch {
-        const fallbackHotels = websiteHotels.length > 0 ? websiteHotels : ((await apiRequest("/api/hotels")) as Hotel[]);
-        sendSse(response, "delta", { text: conversationalHotelReply(message, fallbackHotels, history) });
-        sendSse(response, "done", { data: fallbackHotels });
+    if (anthropicApiKey) {
+      if (isTravelPrompt(message)) {
+        await streamAnthropicChat(response, message, websiteHotels, history);
+      } else {
+        await streamAnthropicGeneralChat(response, message, history);
       }
     } else {
-      const result = await chatWithHotelAssistant(message, history, websiteHotels);
-      sendSse(response, "delta", { text: result.reply });
-      sendSse(response, "done", { data: result.data ?? null });
+      try {
+        await streamCodexChat(response, message, history, websiteHotels);
+      } catch {
+        if (isTravelPrompt(message)) {
+          const result = await chatWithHotelAssistant(message, history, websiteHotels);
+          sendSse(response, "delta", { text: result.reply });
+          sendSse(response, "done", { data: result.data ?? null });
+        } else {
+          sendGeneralFallback(response, message);
+        }
+      }
     }
   } catch (error) {
     sendSse(response, "error", {
@@ -796,7 +1059,10 @@ function startHttpChatAdapter() {
   });
 }
 
-server.tool("list_hotels", { city: z.string().optional() }, async ({ city }) => {
+server.tool(
+  "list_hotels",
+  { city: z.string().optional().describe("Optional city to filter hotels by") },
+  async ({ city }) => {
   const query = city ? `?city=${encodeURIComponent(city)}` : "";
   const hotels = await apiRequest(`/api/hotels${query}`);
   return {
@@ -809,7 +1075,10 @@ server.tool("list_hotels", { city: z.string().optional() }, async ({ city }) => 
   };
 });
 
-server.tool("get_hotel", { hotelId: z.number().int().positive() }, async ({ hotelId }) => {
+server.tool(
+  "get_hotel",
+  { hotelId: z.number().int().positive().describe("The unique ID of the hotel") },
+  async ({ hotelId }) => {
   const hotel = await apiRequest(`/api/hotels/${hotelId}`);
   return {
     content: [

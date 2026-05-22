@@ -1,0 +1,3 @@
+[mcp_servers.codefest-mcp]
+args = ["/Users/wesleyprice/Code/code-fest-26/apps/mcp-server/dist/index.js"]
+command = "node"
